@@ -1,0 +1,148 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: api-gateway
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api-gateway
+    spec:
+      initContainers:
+        - name: wait-for-infrastructure
+          image: localhost/yellowpad/api-gateway:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -c
+            - |
+              import os
+              import time
+              import psycopg2
+              import redis
+              import boto3
+
+              checks = {
+                  "postgres": lambda: psycopg2.connect(
+                      host=os.environ["DB_HOST"],
+                      port=os.environ["DB_PORT"],
+                      dbname=os.environ["DB_NAME"],
+                      user=os.environ["DB_USER"],
+                      password=os.environ["DB_PASSWORD"],
+                  ).close(),
+                  "redis": lambda: redis.Redis(
+                      host=os.environ["REDIS_HOST"],
+                      port=int(os.environ["REDIS_PORT"]),
+                  ).ping(),
+                  "minio": lambda: boto3.client(
+                      "s3",
+                      endpoint_url=os.environ["MINIO_ENDPOINT"],
+                      aws_access_key_id=os.environ["MINIO_ACCESS_KEY"],
+                      aws_secret_access_key=os.environ["MINIO_SECRET_KEY"],
+                  ).list_buckets(),
+              }
+
+              for name, check in checks.items():
+                  for attempt in range(60):
+                      try:
+                          check()
+                          print(f"{name} is ready")
+                          break
+                      except Exception as exc:
+                          if attempt == 59:
+                              raise
+                          print(f"waiting for {name}: {exc}")
+                          time.sleep(2)
+          envFrom:
+            - configMapRef:
+                name: yellowpad-config
+          env:
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: yellowpad-db
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: yellowpad-db
+                  key: DB_PASSWORD
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: yellowpad-minio
+                  key: MINIO_ACCESS_KEY
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: yellowpad-minio
+                  key: MINIO_SECRET_KEY
+      containers:
+        - name: api-gateway
+          image: localhost/yellowpad/api-gateway:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: yellowpad-config
+          env:
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: yellowpad-db
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: yellowpad-db
+                  key: DB_PASSWORD
+            - name: MINIO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: yellowpad-minio
+                  key: MINIO_ACCESS_KEY
+            - name: MINIO_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: yellowpad-minio
+                  key: MINIO_SECRET_KEY
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 45
+            periodSeconds: 20
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
